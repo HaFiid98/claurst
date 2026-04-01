@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use cc_api::client::ClientConfig;
-use cc_api::AnthropicClient;
+use cc_api::AnyClient;
 use cc_core::types::Message;
 use cc_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -104,26 +104,50 @@ impl Tool for AgentTool {
 
         info!(description = %params.description, "Spawning sub-agent");
 
-        // Resolve API key from environment.
-        let api_key = match std::env::var("ANTHROPIC_API_KEY")
+        // Dedicated client for the sub-agent.
+        // Prefer the same provider as the parent by checking env vars.
+        let client = if let Some(key) = std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|k| !k.is_empty())
         {
-            Some(k) => k,
-            None => {
-                return ToolResult::error(
-                    "ANTHROPIC_API_KEY not set – cannot spawn sub-agent".to_string(),
-                )
+            match cc_api::AnthropicClient::new(ClientConfig {
+                api_key: key,
+                ..Default::default()
+            }) {
+                Ok(c) => Arc::new(AnyClient::Anthropic(c)),
+                Err(e) => return ToolResult::error(format!("Failed to create client: {}", e)),
             }
-        };
-
-        // Dedicated Anthropic client for the sub-agent.
-        let client = match AnthropicClient::new(ClientConfig {
-            api_key,
-            ..Default::default()
-        }) {
-            Ok(c) => Arc::new(c),
-            Err(e) => return ToolResult::error(format!("Failed to create client: {}", e)),
+        } else if let Some(key) = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+        {
+            let base = std::env::var("OPENAI_API_BASE")
+                .unwrap_or_else(|_| "https://api.openai.com".to_string());
+            match cc_api::OpenAICompatibleClient::new(ClientConfig {
+                api_key: key,
+                api_base: base,
+                ..Default::default()
+            }) {
+                Ok(c) => Arc::new(AnyClient::OpenAI(c)),
+                Err(e) => return ToolResult::error(format!("Failed to create client: {}", e)),
+            }
+        } else if let Some(base) = std::env::var("OLLAMA_HOST")
+            .ok()
+            .filter(|k| !k.is_empty())
+        {
+            match cc_api::OpenAICompatibleClient::new(ClientConfig {
+                api_key: String::new(),
+                api_base: base,
+                ..Default::default()
+            }) {
+                Ok(c) => Arc::new(AnyClient::OpenAI(c)),
+                Err(e) => return ToolResult::error(format!("Failed to create client: {}", e)),
+            }
+        } else {
+            return ToolResult::error(
+                "No API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY) – cannot spawn sub-agent"
+                    .to_string(),
+            );
         };
 
         // Build the tool list for the sub-agent.

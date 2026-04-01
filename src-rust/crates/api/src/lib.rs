@@ -2,7 +2,8 @@
 // Rust port.
 //
 // Handles:
-// - POST /v1/messages with streaming
+// - POST /v1/messages with streaming (Anthropic)
+// - POST /v1/chat/completions with streaming (OpenAI-compatible: Ollama, LM Studio, …)
 // - SSE event parsing (message_start, content_block_start, content_block_delta,
 //   content_block_stop, message_delta, message_stop, error)
 // - Delta types: text_delta, input_json_delta, thinking_delta, signature_delta
@@ -24,8 +25,45 @@ use tracing::{debug, warn};
 // Public re-exports
 // ---------------------------------------------------------------------------
 pub use client::AnthropicClient;
+pub use openai::OpenAICompatibleClient;
 pub use streaming::{StreamEvent, StreamHandler};
 pub use types::*;
+
+// ---------------------------------------------------------------------------
+// Provider-agnostic client wrapper
+// ---------------------------------------------------------------------------
+
+/// A unified client that can talk to either the Anthropic API or any
+/// OpenAI-compatible endpoint (Ollama, LM Studio, OpenAI, …).
+pub enum AnyClient {
+    Anthropic(AnthropicClient),
+    OpenAI(OpenAICompatibleClient),
+}
+
+impl AnyClient {
+    /// Streaming inference – same interface as `AnthropicClient::create_message_stream`.
+    pub async fn create_message_stream(
+        &self,
+        request: CreateMessageRequest,
+        handler: Arc<dyn StreamHandler>,
+    ) -> Result<mpsc::Receiver<StreamEvent>, ClaudeError> {
+        match self {
+            AnyClient::Anthropic(c) => c.create_message_stream(request, handler).await,
+            AnyClient::OpenAI(c) => c.create_message_stream(request, handler).await,
+        }
+    }
+
+    /// Non-streaming inference.
+    pub async fn create_message(
+        &self,
+        request: CreateMessageRequest,
+    ) -> Result<CreateMessageResponse, ClaudeError> {
+        match self {
+            AnyClient::Anthropic(c) => c.create_message(request).await,
+            AnyClient::OpenAI(c) => c.create_message(request).await,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // request / response types
@@ -250,7 +288,7 @@ pub mod streaming {
 // ---------------------------------------------------------------------------
 // SSE line parser
 // ---------------------------------------------------------------------------
-mod sse_parser {
+pub(crate) mod sse_parser {
     /// Parsed SSE frame.
     #[derive(Debug)]
     pub struct SseFrame {
@@ -302,6 +340,11 @@ mod sse_parser {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible client
+// ---------------------------------------------------------------------------
+pub mod openai;
 
 // ---------------------------------------------------------------------------
 // Anthropic client

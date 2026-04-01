@@ -128,11 +128,11 @@ pub fn should_auto_compact(input_tokens: u64, model: &str, state: &AutoCompactSt
 // Core compaction logic
 // ---------------------------------------------------------------------------
 
-/// Summarise `messages[..split_at]` using the Anthropic API and return a
+/// Summarise `messages[..split_at]` using the API and return a
 /// new conversation consisting of a single summary message followed by
 /// `messages[split_at..]`.
 async fn summarise_head(
-    client: &cc_api::AnthropicClient,
+    client: &cc_api::AnyClient,
     messages: &[Message],
     split_at: usize,
     model: &str,
@@ -225,7 +225,7 @@ async fn summarise_head(
 /// Compact `messages` in-place, replacing the head with a summary.
 /// Returns the new messages vector on success.
 pub async fn compact_conversation(
-    client: &cc_api::AnthropicClient,
+    client: &cc_api::AnyClient,
     messages: &[Message],
     model: &str,
 ) -> Result<Vec<Message>, ClaudeError> {
@@ -255,7 +255,7 @@ pub async fn compact_conversation(
 /// Auto-compact `messages` if needed.  Updates `state` in place.
 /// Returns `Some(new_messages)` if compaction ran, `None` otherwise.
 pub async fn auto_compact_if_needed(
-    client: &cc_api::AnthropicClient,
+    client: &cc_api::AnyClient,
     messages: &[Message],
     input_tokens: u64,
     model: &str,

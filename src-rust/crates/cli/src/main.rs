@@ -162,6 +162,19 @@ struct Cli {
     /// Disable auto-compaction
     #[arg(long = "no-auto-compact", action = ArgAction::SetTrue)]
     no_auto_compact: bool,
+
+    /// Model provider: anthropic (default), openai, or ollama.
+    /// Use "openai" for OpenAI or any OpenAI-compatible server.
+    /// Use "ollama" to connect to a local Ollama instance.
+    #[arg(long = "provider", default_value = "anthropic")]
+    provider: String,
+
+    /// Custom API base URL.  Overrides the provider's default endpoint.
+    /// Examples: http://localhost:11434  (Ollama)
+    ///           http://localhost:1234   (LM Studio)
+    ///           https://api.openai.com (OpenAI)
+    #[arg(long = "api-base")]
+    api_base: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -222,6 +235,78 @@ fn resolve_bridge_config(
     }
 
     bridge_config.is_active().then_some(bridge_config)
+}
+
+// ---------------------------------------------------------------------------
+// Build the appropriate API client based on --provider / --api-base flags.
+// ---------------------------------------------------------------------------
+
+fn build_client(
+    cli: &Cli,
+    anthropic_cfg: cc_api::client::ClientConfig,
+    api_key: String,
+) -> anyhow::Result<cc_api::AnyClient> {
+    use cc_api::client::ClientConfig;
+
+    let provider = cli.provider.to_lowercase();
+
+    match provider.as_str() {
+        "anthropic" | "" => {
+            // Use the configured base (resolves ANTHROPIC_BASE_URL if set).
+            let cfg = if let Some(ref base) = cli.api_base {
+                ClientConfig {
+                    api_base: base.clone(),
+                    ..anthropic_cfg
+                }
+            } else {
+                anthropic_cfg
+            };
+            cc_api::AnthropicClient::new(cfg)
+                .map(cc_api::AnyClient::Anthropic)
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+
+        "openai" => {
+            let base = cli
+                .api_base
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_BASE").ok())
+                .unwrap_or_else(|| "https://api.openai.com".to_string());
+            let key = if api_key.is_empty() {
+                std::env::var("OPENAI_API_KEY").unwrap_or_default()
+            } else {
+                api_key
+            };
+            cc_api::OpenAICompatibleClient::new(ClientConfig {
+                api_key: key,
+                api_base: base,
+                ..Default::default()
+            })
+            .map(cc_api::AnyClient::OpenAI)
+            .map_err(|e| anyhow::anyhow!(e))
+        }
+
+        "ollama" => {
+            let base = cli
+                .api_base
+                .clone()
+                .or_else(|| std::env::var("OLLAMA_HOST").ok())
+                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            // Ollama does not require an API key for local deployments.
+            cc_api::OpenAICompatibleClient::new(ClientConfig {
+                api_key: api_key, // empty is fine
+                api_base: base,
+                ..Default::default()
+            })
+            .map(cc_api::AnyClient::OpenAI)
+            .map_err(|e| anyhow::anyhow!(e))
+        }
+
+        other => anyhow::bail!(
+            "Unknown provider '{}'. Supported providers: anthropic, openai, ollama",
+            other
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,24 +454,38 @@ async fn main() -> anyhow::Result<()> {
     // Determine mode early (needed for auth error handling and permission handler selection).
     let is_headless = cli.print || cli.prompt.is_some();
 
+    // For OpenAI-compatible providers that don't require auth (e.g. Ollama), skip
+    // the credential lookup so we don't prompt for a key that isn't needed.
+    let needs_auth = matches!(cli.provider.to_lowercase().as_str(), "anthropic" | "");
+
     // Initialize API client.
     // Try config/env first; fall back to saved OAuth tokens; finally prompt for login.
-    let (api_key, use_bearer_auth) = match config.resolve_auth_async().await {
-        Some(auth) => auth,
-        None => {
-            // No credential found — run interactive OAuth login (non-headless) or error.
-            if is_headless {
-                anyhow::bail!(
-                    "No API key found. Set ANTHROPIC_API_KEY, use --api-key, or run `claude login`."
-                );
+    let (api_key, use_bearer_auth) = if needs_auth {
+        match config.resolve_auth_async().await {
+            Some(auth) => auth,
+            None => {
+                // No credential found — run interactive OAuth login (non-headless) or error.
+                if is_headless {
+                    anyhow::bail!(
+                        "No API key found. Set ANTHROPIC_API_KEY, use --api-key, or run `claude login`."
+                    );
+                }
+                eprintln!("No authentication found. Starting login flow...");
+                let result = oauth_flow::run_oauth_login_flow(true)
+                    .await
+                    .context("Login failed")?;
+                println!("Login successful!");
+                (result.credential, result.use_bearer_auth)
             }
-            eprintln!("No authentication found. Starting login flow...");
-            let result = oauth_flow::run_oauth_login_flow(true)
-                .await
-                .context("Login failed")?;
-            println!("Login successful!");
-            (result.credential, result.use_bearer_auth)
         }
+    } else {
+        // Non-Anthropic provider: use whatever key was supplied (may be empty).
+        let key = cli
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()))
+            .unwrap_or_default();
+        (key, false)
     };
 
     let client_config = cc_api::client::ClientConfig {
@@ -396,7 +495,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let client = Arc::new(
-        cc_api::AnthropicClient::new(client_config)
+        build_client(&cli, client_config, api_key.clone())
             .context("Failed to create API client")?,
     );
 
@@ -563,7 +662,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_headless(
     cli: &Cli,
-    client: Arc<cc_api::AnthropicClient>,
+    client: Arc<cc_api::AnyClient>,
     tools: Arc<Vec<Box<dyn cc_tools::Tool>>>,
     tool_ctx: ToolContext,
     query_config: cc_query::QueryConfig,
@@ -746,7 +845,7 @@ async fn run_headless(
 
 async fn run_interactive(
     config: Config,
-    client: Arc<cc_api::AnthropicClient>,
+    client: Arc<cc_api::AnyClient>,
     tools: Arc<Vec<Box<dyn cc_tools::Tool>>>,
     tool_ctx: ToolContext,
     query_config: cc_query::QueryConfig,
