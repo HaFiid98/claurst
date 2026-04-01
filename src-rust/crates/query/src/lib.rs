@@ -198,6 +198,9 @@ pub async fn run_query_loop(
             Ok(rx) => rx,
             Err(e) => {
                 error!(error = %e, "API request failed");
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(QueryEvent::Error(e.to_string()));
+                }
                 return QueryOutcome::Error(e);
             }
         };

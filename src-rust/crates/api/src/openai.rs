@@ -603,7 +603,10 @@ impl OpenAICompatibleClient {
         handler: Arc<dyn StreamHandler>,
     ) -> Result<mpsc::Receiver<StreamEvent>, ClaudeError> {
         let oai_request = self.convert_request(request)?;
-        let url = format!("{}/v1/chat/completions", self.config.api_base);
+        let url = format!(
+            "{}/chat/completions",
+            self.config.api_base.trim_end_matches('/')
+        );
 
         let mut req = self
             .http

@@ -270,7 +270,7 @@ fn build_client(
             let base = api_base
                 .map(|s| s.to_string())
                 .or_else(|| std::env::var("OPENAI_API_BASE").ok())
-                .unwrap_or_else(|| "https://api.openai.com".to_string());
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let key = if api_key.is_empty() {
                 std::env::var("OPENAI_API_KEY").unwrap_or_default()
             } else {
@@ -289,7 +289,7 @@ fn build_client(
             let base = api_base
                 .map(|s| s.to_string())
                 .or_else(|| std::env::var("OLLAMA_HOST").ok())
-                .unwrap_or_else(|| "http://localhost:11434".to_string());
+                .unwrap_or_else(|| "http://localhost:11434/v1".to_string());
             // Ollama does not require an API key for local deployments.
             cc_api::OpenAICompatibleClient::new(ClientConfig {
                 api_key, // empty is fine
@@ -1503,8 +1503,8 @@ async fn run_interactive(
 
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
-                // Get the outcome (ignore errors for now)
-                let _ = handle.await;
+                // Capture the outcome so we can surface errors in the TUI.
+                let outcome = handle.await.unwrap_or(QueryOutcome::Cancelled);
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -1512,7 +1512,14 @@ async fn run_interactive(
                 session.model = cmd_ctx.config.effective_model().to_string();
                 session.working_dir = Some(tool_ctx.working_dir.display().to_string());
                 app.is_streaming = false;
-                app.status_message = None;
+                // Show errors that were not already surfaced via QueryEvent::Error.
+                if let QueryOutcome::Error(ref e) = outcome {
+                    let msg = format!("Error: {}", e);
+                    app.status_message = Some(msg.clone());
+                    app.messages.push(cc_core::types::Message::assistant(msg));
+                } else {
+                    app.status_message = None;
+                }
 
                 // Save session
                 let _ = cc_core::history::save_session(&session).await;
