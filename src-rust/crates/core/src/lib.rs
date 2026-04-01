@@ -558,13 +558,17 @@ pub mod config {
                 .filter(|prompt| !prompt.trim().is_empty())
         }
 
-        /// Resolve the API key from the config, then from provider-specific env vars,
-        /// and finally from the universal `CLAURST_API_KEY` fallback.
+        /// Resolve the Anthropic API key from the config or from the
+        /// `ANTHROPIC_API_KEY` environment variable.
+        ///
+        /// Note: the universal `CLAURST_API_KEY` env var is intentionally
+        /// *not* included here because it may hold a key for a different
+        /// provider (e.g. OpenRouter).  That variable is handled separately
+        /// in the CLI entry point for non-Anthropic providers.
         pub fn resolve_api_key(&self) -> Option<String> {
             self.api_key
                 .clone()
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-                .or_else(|| std::env::var("CLAURST_API_KEY").ok())
         }
 
         /// Async variant: also checks `~/.claude/oauth_tokens.json`.

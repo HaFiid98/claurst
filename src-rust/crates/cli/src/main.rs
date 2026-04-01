@@ -562,7 +562,7 @@ async fn main() -> anyhow::Result<()> {
                 // No credential found — show a choice menu (non-headless) or error out.
                 if is_headless {
                     anyhow::bail!(
-                        "No API key found. Set ANTHROPIC_API_KEY (or CLAURST_API_KEY), use --api-key, or run `claude login`."
+                        "No API key found. Set ANTHROPIC_API_KEY, use --api-key, or run `claude login`."
                     );
                 }
                 match prompt_auth_choice().await? {
