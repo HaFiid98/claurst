@@ -135,7 +135,8 @@ struct Cli {
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
 
-    /// API key (overrides ANTHROPIC_API_KEY env var)
+    /// API key for the selected provider.
+    /// Overrides ANTHROPIC_API_KEY / OPENAI_API_KEY / CLAURST_API_KEY env vars.
     #[arg(long = "api-key")]
     api_key: Option<String>,
 
@@ -561,7 +562,7 @@ async fn main() -> anyhow::Result<()> {
                 // No credential found — show a choice menu (non-headless) or error out.
                 if is_headless {
                     anyhow::bail!(
-                        "No API key found. Set ANTHROPIC_API_KEY, use --api-key, or run `claude login`."
+                        "No API key found. Set ANTHROPIC_API_KEY (or CLAURST_API_KEY), use --api-key, or run `claude login`."
                     );
                 }
                 match prompt_auth_choice().await? {
@@ -578,10 +579,12 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         // Non-Anthropic provider: use whatever key was supplied (may be empty).
+        // Priority: --api-key flag → OPENAI_API_KEY → CLAURST_API_KEY (universal fallback) → empty
         let key = cli
             .api_key
             .clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()))
+            .or_else(|| std::env::var("CLAURST_API_KEY").ok().filter(|k| !k.is_empty()))
             .unwrap_or_default();
         (key, false)
     };

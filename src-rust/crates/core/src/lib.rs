@@ -558,11 +558,13 @@ pub mod config {
                 .filter(|prompt| !prompt.trim().is_empty())
         }
 
-        /// Resolve the API key from the config, then from `ANTHROPIC_API_KEY`.
+        /// Resolve the API key from the config, then from provider-specific env vars,
+        /// and finally from the universal `CLAURST_API_KEY` fallback.
         pub fn resolve_api_key(&self) -> Option<String> {
             self.api_key
                 .clone()
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .or_else(|| std::env::var("CLAURST_API_KEY").ok())
         }
 
         /// Async variant: also checks `~/.claude/oauth_tokens.json`.
