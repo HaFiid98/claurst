@@ -415,6 +415,13 @@ pub mod config {
     pub struct Config {
         pub api_key: Option<String>,
         pub model: Option<String>,
+        /// Persisted provider (e.g. "anthropic", "openai", "ollama").
+        /// When set, overrides the CLI default of "anthropic".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub provider: Option<String>,
+        /// Persisted custom API base URL (e.g. "https://openrouter.ai/api/v1").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub api_base: Option<String>,
         pub max_tokens: Option<u32>,
         pub permission_mode: PermissionMode,
         pub theme: Theme,

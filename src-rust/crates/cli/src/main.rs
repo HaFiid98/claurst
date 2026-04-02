@@ -545,8 +545,15 @@ async fn main() -> anyhow::Result<()> {
     let is_headless = cli.print || cli.prompt.is_some();
 
     // Effective provider / api-base / model — may be overridden by the auth-choice menu.
-    let mut effective_provider = cli.provider.clone();
-    let mut effective_api_base = cli.api_base.clone();
+    // CLI flags take precedence; fall back to saved settings so the user doesn't have
+    // to re-enter provider/api-base on every launch.
+    let cli_provider_is_default = cli.provider == "anthropic" && cli.api_base.is_none();
+    let mut effective_provider = if cli_provider_is_default {
+        config.provider.clone().unwrap_or(cli.provider.clone())
+    } else {
+        cli.provider.clone()
+    };
+    let mut effective_api_base = cli.api_base.clone().or_else(|| config.api_base.clone());
     let mut effective_model = cli.model.clone();
 
     // For OpenAI-compatible providers that don't require auth (e.g. Ollama), skip
@@ -568,10 +575,16 @@ async fn main() -> anyhow::Result<()> {
                 match prompt_auth_choice().await? {
                     AuthOutcome::Credential(key, bearer) => (key, bearer),
                     AuthOutcome::LocalModel { provider, base_url, model } => {
-                        effective_provider = provider;
-                        effective_api_base = Some(base_url);
+                        effective_provider = provider.clone();
+                        effective_api_base = Some(base_url.clone());
                         effective_model = model.clone();
                         config.model = Some(model);
+                        // Persist the chosen provider/api_base so the user isn't prompted again.
+                        config.provider = Some(provider);
+                        config.api_base = Some(base_url);
+                        let mut s = settings.clone();
+                        s.config = config.clone();
+                        let _ = s.save().await;
                         (String::new(), false)
                     }
                 }
@@ -586,6 +599,14 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()))
             .or_else(|| std::env::var("CLAURST_API_KEY").ok().filter(|k| !k.is_empty()))
             .unwrap_or_default();
+        // If the user explicitly specified --provider/--api-base via CLI flags, persist them.
+        if !cli_provider_is_default {
+            config.provider = Some(effective_provider.clone());
+            config.api_base = effective_api_base.clone();
+            let mut s = settings.clone();
+            s.config = config.clone();
+            let _ = s.save().await;
+        }
         (key, false)
     };
 
