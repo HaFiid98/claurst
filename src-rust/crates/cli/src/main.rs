@@ -326,10 +326,27 @@ enum AuthOutcome {
 async fn prompt_auth_choice() -> anyhow::Result<AuthOutcome> {
     use std::io::Write;
 
-    println!("\nNo authentication found. How would you like to proceed?\n");
-    println!("  [1] Login with browser (Claude OAuth)");
-    println!("  [2] Enter an Anthropic API key");
-    println!("  [3] Use a local model (Ollama / OpenAI-compatible)\n");
+    println!();
+    println!("┌─────────────────────────────────────────────────────────┐");
+    println!("│              No authentication configured               │");
+    println!("├─────────────────────────────────────────────────────────┤");
+    println!("│  Choose how you want to connect:                        │");
+    println!("│                                                         │");
+    println!("│  [1] Login with browser  (Claude.ai OAuth)              │");
+    println!("│      → Opens a browser tab to sign in with your         │");
+    println!("│        Claude.ai account. No API key needed.            │");
+    println!("│                                                         │");
+    println!("│  [2] Enter an API key    (Anthropic / OpenRouter / …)   │");
+    println!("│      → Paste a key from console.anthropic.com or        │");
+    println!("│        openrouter.ai/keys. Starts with sk-ant- or       │");
+    println!("│        sk-or-v1-.  Saved for future sessions.           │");
+    println!("│                                                         │");
+    println!("│  [3] Use a local LLM     (Ollama / LM Studio / …)      │");
+    println!("│      → Connect to a model running on your machine.      │");
+    println!("│        You will specify the provider type, server URL,  │");
+    println!("│        and model name (e.g. llama3, mistral, phi3).     │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    println!();
 
     loop {
         print!("Choose [1/2/3]: ");
@@ -347,19 +364,29 @@ async fn prompt_auth_choice() -> anyhow::Result<AuthOutcome> {
                 return Ok(AuthOutcome::Credential(result.credential, result.use_bearer_auth));
             }
             "2" => {
-                print!("Enter your Anthropic API key (sk-ant-...): ");
+                println!();
+                println!("  Paste your API key below.");
+                println!("  • Anthropic keys start with  sk-ant-   (get one at console.anthropic.com)");
+                println!("  • OpenRouter keys start with sk-or-v1- (get one at openrouter.ai/keys)");
+                println!();
+                print!("  API key: ");
                 std::io::stdout().flush().ok();
                 let mut key = String::new();
                 std::io::stdin().read_line(&mut key)?;
                 let key = key.trim().to_string();
                 if key.is_empty() {
-                    eprintln!("API key cannot be empty. Please try again.");
+                    eprintln!("  API key cannot be empty. Please try again.");
                     continue;
                 }
                 return Ok(AuthOutcome::Credential(key, false));
             }
             "3" => {
-                print!("Provider [ollama/openai] (default: ollama): ");
+                println!();
+                println!("  ── Local LLM setup ────────────────────────────────────────");
+                println!("  Step 1 of 3 – Provider type");
+                println!("    ollama  → Ollama running locally  (ollama.com)");
+                println!("    openai  → LM Studio, llama.cpp, or any OpenAI-compatible server");
+                print!("  Provider [ollama/openai] (default: ollama): ");
                 std::io::stdout().flush().ok();
                 let mut provider_input = String::new();
                 std::io::stdin().read_line(&mut provider_input)?;
@@ -373,7 +400,11 @@ async fn prompt_auth_choice() -> anyhow::Result<AuthOutcome> {
                 } else {
                     "http://localhost:1234"
                 };
-                print!("Base URL (default: {}): ", default_url);
+                println!();
+                println!("  Step 2 of 3 – Server URL");
+                println!("    This is the base address of your local server.");
+                println!("    Default for {}: {}", provider, default_url);
+                print!("  Base URL (default: {}): ", default_url);
                 std::io::stdout().flush().ok();
                 let mut base_input = String::new();
                 std::io::stdin().read_line(&mut base_input)?;
@@ -383,7 +414,16 @@ async fn prompt_auth_choice() -> anyhow::Result<AuthOutcome> {
                 };
 
                 let default_model = if provider == "ollama" { "llama3" } else { "gpt-4" };
-                print!("Model (default: {}): ", default_model);
+                println!();
+                println!("  Step 3 of 3 – Model name");
+                if provider == "ollama" {
+                    println!("    Run `ollama list` to see installed models.");
+                    println!("    Examples: llama3, mistral, phi3, codellama");
+                } else {
+                    println!("    Use the exact model ID shown in your server's model list.");
+                    println!("    Examples: gpt-4, mistral-7b-instruct, phi-3-mini");
+                }
+                print!("  Model (default: {}): ", default_model);
                 std::io::stdout().flush().ok();
                 let mut model_input = String::new();
                 std::io::stdin().read_line(&mut model_input)?;
@@ -392,9 +432,13 @@ async fn prompt_auth_choice() -> anyhow::Result<AuthOutcome> {
                     if m.is_empty() { default_model } else { m }.to_string()
                 };
 
+                println!();
+                println!("  ✓ Local LLM configured: {} @ {} using model '{}'", provider, base_url, model);
+                println!("  This choice will be remembered for future sessions.");
+                println!();
                 return Ok(AuthOutcome::LocalModel { provider, base_url, model });
             }
-            _ => eprintln!("Please enter 1, 2, or 3."),
+            _ => eprintln!("  Please enter 1, 2, or 3."),
         }
     }
 }
