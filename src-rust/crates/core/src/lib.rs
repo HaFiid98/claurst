@@ -415,6 +415,13 @@ pub mod config {
     pub struct Config {
         pub api_key: Option<String>,
         pub model: Option<String>,
+        /// Persisted provider (e.g. "anthropic", "openai", "ollama").
+        /// When set, overrides the CLI default of "anthropic".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub provider: Option<String>,
+        /// Persisted custom API base URL (e.g. "https://openrouter.ai/api/v1").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub api_base: Option<String>,
         pub max_tokens: Option<u32>,
         pub permission_mode: PermissionMode,
         pub theme: Theme,
@@ -558,7 +565,13 @@ pub mod config {
                 .filter(|prompt| !prompt.trim().is_empty())
         }
 
-        /// Resolve the API key from the config, then from `ANTHROPIC_API_KEY`.
+        /// Resolve the Anthropic API key from the config or from the
+        /// `ANTHROPIC_API_KEY` environment variable.
+        ///
+        /// Note: the universal `CLAURST_API_KEY` env var is intentionally
+        /// *not* included here because it may hold a key for a different
+        /// provider (e.g. OpenRouter).  That variable is handled separately
+        /// in the CLI entry point for non-Anthropic providers.
         pub fn resolve_api_key(&self) -> Option<String> {
             self.api_key
                 .clone()

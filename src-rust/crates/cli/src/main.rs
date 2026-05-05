@@ -135,7 +135,8 @@ struct Cli {
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
 
-    /// API key (overrides ANTHROPIC_API_KEY env var)
+    /// API key for the selected provider.
+    /// Overrides ANTHROPIC_API_KEY / OPENAI_API_KEY / CLAURST_API_KEY env vars.
     #[arg(long = "api-key")]
     api_key: Option<String>,
 
@@ -162,6 +163,19 @@ struct Cli {
     /// Disable auto-compaction
     #[arg(long = "no-auto-compact", action = ArgAction::SetTrue)]
     no_auto_compact: bool,
+
+    /// Model provider: anthropic (default), openai, or ollama.
+    /// Use "openai" for OpenAI or any OpenAI-compatible server.
+    /// Use "ollama" to connect to a local Ollama instance.
+    #[arg(long = "provider", default_value = "anthropic")]
+    provider: String,
+
+    /// Custom API base URL.  Overrides the provider's default endpoint.
+    /// Examples: http://localhost:11434  (Ollama)
+    ///           http://localhost:1234   (LM Studio)
+    ///           https://api.openai.com (OpenAI)
+    #[arg(long = "api-base")]
+    api_base: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -222,6 +236,211 @@ fn resolve_bridge_config(
     }
 
     bridge_config.is_active().then_some(bridge_config)
+}
+
+// ---------------------------------------------------------------------------
+// Build the appropriate API client based on --provider / --api-base flags.
+// ---------------------------------------------------------------------------
+
+fn build_client(
+    provider: &str,
+    api_base: Option<&str>,
+    anthropic_cfg: cc_api::client::ClientConfig,
+    api_key: String,
+) -> anyhow::Result<cc_api::AnyClient> {
+    use cc_api::client::ClientConfig;
+
+    match provider.to_lowercase().as_str() {
+        "anthropic" | "" => {
+            // Use the configured base (resolves ANTHROPIC_BASE_URL if set).
+            let cfg = if let Some(base) = api_base {
+                ClientConfig {
+                    api_base: base.to_string(),
+                    ..anthropic_cfg
+                }
+            } else {
+                anthropic_cfg
+            };
+            cc_api::AnthropicClient::new(cfg)
+                .map(cc_api::AnyClient::Anthropic)
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+
+        "openai" => {
+            let base = api_base
+                .map(|s| s.to_string())
+                .or_else(|| std::env::var("OPENAI_API_BASE").ok())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let key = if api_key.is_empty() {
+                std::env::var("OPENAI_API_KEY").unwrap_or_default()
+            } else {
+                api_key
+            };
+            cc_api::OpenAICompatibleClient::new(ClientConfig {
+                api_key: key,
+                api_base: base,
+                ..Default::default()
+            })
+            .map(cc_api::AnyClient::OpenAI)
+            .map_err(|e| anyhow::anyhow!(e))
+        }
+
+        "ollama" => {
+            let base = api_base
+                .map(|s| s.to_string())
+                .or_else(|| std::env::var("OLLAMA_HOST").ok())
+                .unwrap_or_else(|| "http://localhost:11434/v1".to_string());
+            // Ollama does not require an API key for local deployments.
+            cc_api::OpenAICompatibleClient::new(ClientConfig {
+                api_key, // empty is fine
+                api_base: base,
+                ..Default::default()
+            })
+            .map(cc_api::AnyClient::OpenAI)
+            .map_err(|e| anyhow::anyhow!(e))
+        }
+
+        other => anyhow::bail!(
+            "Unknown provider '{}'. Supported providers: anthropic, openai, ollama",
+            other
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive auth-choice menu shown when no credentials are configured.
+// ---------------------------------------------------------------------------
+
+/// Result of the interactive auth-choice prompt.
+enum AuthOutcome {
+    /// The user provided (or obtained via OAuth) a credential to use directly.
+    Credential(String, bool), // (credential, use_bearer_auth)
+    /// The user chose to use a local / OpenAI-compatible model instead.
+    LocalModel {
+        provider: String,
+        base_url: String,
+        model: String,
+    },
+}
+
+async fn prompt_auth_choice() -> anyhow::Result<AuthOutcome> {
+    use std::io::Write;
+
+    println!();
+    println!("┌─────────────────────────────────────────────────────────┐");
+    println!("│              No authentication configured               │");
+    println!("├─────────────────────────────────────────────────────────┤");
+    println!("│  Choose how you want to connect:                        │");
+    println!("│                                                         │");
+    println!("│  [1] Login with browser  (Claude.ai OAuth)              │");
+    println!("│      → Opens a browser tab to sign in with your         │");
+    println!("│        Claude.ai account. No API key needed.            │");
+    println!("│                                                         │");
+    println!("│  [2] Enter an API key    (Anthropic / OpenRouter / …)   │");
+    println!("│      → Paste a key from console.anthropic.com or        │");
+    println!("│        openrouter.ai/keys. Starts with sk-ant- or       │");
+    println!("│        sk-or-v1-.  Saved for future sessions.           │");
+    println!("│                                                         │");
+    println!("│  [3] Use a local LLM     (Ollama / LM Studio / …)      │");
+    println!("│      → Connect to a model running on your machine.      │");
+    println!("│        You will specify the provider type, server URL,  │");
+    println!("│        and model name (e.g. llama3, mistral, phi3).     │");
+    println!("└─────────────────────────────────────────────────────────┘");
+    println!();
+
+    loop {
+        print!("Choose [1/2/3]: ");
+        std::io::stdout().flush().ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        match input.trim() {
+            "1" => {
+                let result = oauth_flow::run_oauth_login_flow(true)
+                    .await
+                    .context("Login failed")?;
+                println!("Login successful!");
+                return Ok(AuthOutcome::Credential(result.credential, result.use_bearer_auth));
+            }
+            "2" => {
+                println!();
+                println!("  Paste your API key below.");
+                println!("  • Anthropic keys start with  sk-ant-   (get one at console.anthropic.com)");
+                println!("  • OpenRouter keys start with sk-or-v1- (get one at openrouter.ai/keys)");
+                println!();
+                print!("  API key: ");
+                std::io::stdout().flush().ok();
+                let mut key = String::new();
+                std::io::stdin().read_line(&mut key)?;
+                let key = key.trim().to_string();
+                if key.is_empty() {
+                    eprintln!("  API key cannot be empty. Please try again.");
+                    continue;
+                }
+                return Ok(AuthOutcome::Credential(key, false));
+            }
+            "3" => {
+                println!();
+                println!("  ── Local LLM setup ────────────────────────────────────────");
+                println!("  Step 1 of 3 – Provider type");
+                println!("    ollama  → Ollama running locally  (ollama.com)");
+                println!("    openai  → LM Studio, llama.cpp, or any OpenAI-compatible server");
+                print!("  Provider [ollama/openai] (default: ollama): ");
+                std::io::stdout().flush().ok();
+                let mut provider_input = String::new();
+                std::io::stdin().read_line(&mut provider_input)?;
+                let provider = {
+                    let p = provider_input.trim();
+                    if p.is_empty() { "ollama" } else { p }.to_string()
+                };
+
+                let default_url = if provider == "ollama" {
+                    "http://localhost:11434"
+                } else {
+                    "http://localhost:1234"
+                };
+                println!();
+                println!("  Step 2 of 3 – Server URL");
+                println!("    This is the base address of your local server.");
+                println!("    Default for {}: {}", provider, default_url);
+                print!("  Base URL (default: {}): ", default_url);
+                std::io::stdout().flush().ok();
+                let mut base_input = String::new();
+                std::io::stdin().read_line(&mut base_input)?;
+                let base_url = {
+                    let b = base_input.trim();
+                    if b.is_empty() { default_url } else { b }.to_string()
+                };
+
+                let default_model = if provider == "ollama" { "llama3" } else { "gpt-4" };
+                println!();
+                println!("  Step 3 of 3 – Model name");
+                if provider == "ollama" {
+                    println!("    Run `ollama list` to see installed models.");
+                    println!("    Examples: llama3, mistral, phi3, codellama");
+                } else {
+                    println!("    Use the exact model ID shown in your server's model list.");
+                    println!("    Examples: gpt-4, mistral-7b-instruct, phi-3-mini");
+                }
+                print!("  Model (default: {}): ", default_model);
+                std::io::stdout().flush().ok();
+                let mut model_input = String::new();
+                std::io::stdin().read_line(&mut model_input)?;
+                let model = {
+                    let m = model_input.trim();
+                    if m.is_empty() { default_model } else { m }.to_string()
+                };
+
+                println!();
+                println!("  ✓ Local LLM configured: {} @ {} using model '{}'", provider, base_url, model);
+                println!("  This choice will be remembered for future sessions.");
+                println!();
+                return Ok(AuthOutcome::LocalModel { provider, base_url, model });
+            }
+            _ => eprintln!("  Please enter 1, 2, or 3."),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,25 +588,76 @@ async fn main() -> anyhow::Result<()> {
     // Determine mode early (needed for auth error handling and permission handler selection).
     let is_headless = cli.print || cli.prompt.is_some();
 
-    // Initialize API client.
-    // Try config/env first; fall back to saved OAuth tokens; finally prompt for login.
-    let (api_key, use_bearer_auth) = match config.resolve_auth_async().await {
-        Some(auth) => auth,
-        None => {
-            // No credential found — run interactive OAuth login (non-headless) or error.
-            if is_headless {
-                anyhow::bail!(
-                    "No API key found. Set ANTHROPIC_API_KEY, use --api-key, or run `claude login`."
-                );
-            }
-            eprintln!("No authentication found. Starting login flow...");
-            let result = oauth_flow::run_oauth_login_flow(true)
-                .await
-                .context("Login failed")?;
-            println!("Login successful!");
-            (result.credential, result.use_bearer_auth)
-        }
+    // Effective provider / api-base / model — may be overridden by the auth-choice menu.
+    // CLI flags take precedence; fall back to saved settings so the user doesn't have
+    // to re-enter provider/api-base on every launch.
+    let cli_provider_is_default = cli.provider == "anthropic" && cli.api_base.is_none();
+    let mut effective_provider = if cli_provider_is_default {
+        config.provider.clone().unwrap_or(cli.provider.clone())
+    } else {
+        cli.provider.clone()
     };
+    let mut effective_api_base = cli.api_base.clone().or_else(|| config.api_base.clone());
+    let mut effective_model = cli.model.clone();
+
+    // For OpenAI-compatible providers that don't require auth (e.g. Ollama), skip
+    // the credential lookup so we don't prompt for a key that isn't needed.
+    let needs_auth = matches!(effective_provider.to_lowercase().as_str(), "anthropic" | "");
+
+    // Initialize API client.
+    // Try config/env first; fall back to saved OAuth tokens; finally show a choice menu.
+    let (api_key, use_bearer_auth) = if needs_auth {
+        match config.resolve_auth_async().await {
+            Some(auth) => auth,
+            None => {
+                // No credential found — show a choice menu (non-headless) or error out.
+                if is_headless {
+                    anyhow::bail!(
+                        "No API key found. Set ANTHROPIC_API_KEY, use --api-key, or run `claude login`."
+                    );
+                }
+                match prompt_auth_choice().await? {
+                    AuthOutcome::Credential(key, bearer) => (key, bearer),
+                    AuthOutcome::LocalModel { provider, base_url, model } => {
+                        effective_provider = provider.clone();
+                        effective_api_base = Some(base_url.clone());
+                        effective_model = model.clone();
+                        config.model = Some(model);
+                        // Persist the chosen provider/api_base so the user isn't prompted again.
+                        config.provider = Some(provider);
+                        config.api_base = Some(base_url);
+                        let mut s = settings.clone();
+                        s.config = config.clone();
+                        let _ = s.save().await;
+                        (String::new(), false)
+                    }
+                }
+            }
+        }
+    } else {
+        // Non-Anthropic provider: use whatever key was supplied (may be empty).
+        // Priority: --api-key flag → OPENAI_API_KEY → CLAURST_API_KEY (universal fallback) → empty
+        let key = cli
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()))
+            .or_else(|| std::env::var("CLAURST_API_KEY").ok().filter(|k| !k.is_empty()))
+            .unwrap_or_default();
+        // If the user explicitly specified --provider/--api-base via CLI flags, persist them.
+        if !cli_provider_is_default {
+            config.provider = Some(effective_provider.clone());
+            config.api_base = effective_api_base.clone();
+            let mut s = settings.clone();
+            s.config = config.clone();
+            let _ = s.save().await;
+        }
+        (key, false)
+    };
+
+    // Sync effective_model back into config if it was overridden by the menu.
+    if config.model.as_deref() != Some(&effective_model) {
+        config.model = Some(effective_model.clone());
+    }
 
     let client_config = cc_api::client::ClientConfig {
         api_key: api_key.clone(),
@@ -396,8 +666,13 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let client = Arc::new(
-        cc_api::AnthropicClient::new(client_config)
-            .context("Failed to create API client")?,
+        build_client(
+            &effective_provider,
+            effective_api_base.as_deref(),
+            client_config,
+            api_key.clone(),
+        )
+        .context("Failed to create API client")?,
     );
 
     let bridge_config = resolve_bridge_config(&settings, &api_key, use_bearer_auth, is_headless);
@@ -563,7 +838,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_headless(
     cli: &Cli,
-    client: Arc<cc_api::AnthropicClient>,
+    client: Arc<cc_api::AnyClient>,
     tools: Arc<Vec<Box<dyn cc_tools::Tool>>>,
     tool_ctx: ToolContext,
     query_config: cc_query::QueryConfig,
@@ -746,7 +1021,7 @@ async fn run_headless(
 
 async fn run_interactive(
     config: Config,
-    client: Arc<cc_api::AnthropicClient>,
+    client: Arc<cc_api::AnyClient>,
     tools: Arc<Vec<Box<dyn cc_tools::Tool>>>,
     tool_ctx: ToolContext,
     query_config: cc_query::QueryConfig,
@@ -1293,8 +1568,8 @@ async fn run_interactive(
 
         if task_finished {
             if let Some((handle, msgs_arc)) = current_query.take() {
-                // Get the outcome (ignore errors for now)
-                let _ = handle.await;
+                // Capture the outcome so we can surface errors in the TUI.
+                let outcome = handle.await.unwrap_or(QueryOutcome::Cancelled);
                 // Sync the updated conversation back to our local vector
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
@@ -1302,7 +1577,14 @@ async fn run_interactive(
                 session.model = cmd_ctx.config.effective_model().to_string();
                 session.working_dir = Some(tool_ctx.working_dir.display().to_string());
                 app.is_streaming = false;
-                app.status_message = None;
+                // Show errors that were not already surfaced via QueryEvent::Error.
+                if let QueryOutcome::Error(ref e) = outcome {
+                    let msg = format!("Error: {}", e);
+                    app.status_message = Some(msg.clone());
+                    app.messages.push(cc_core::types::Message::assistant(msg));
+                } else {
+                    app.status_message = None;
+                }
 
                 // Save session
                 let _ = cc_core::history::save_session(&session).await;
